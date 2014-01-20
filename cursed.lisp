@@ -18,45 +18,44 @@
 ;;;;
 
 (defpackage :cursed
-  (:use :cl :capi)
+  (:use :cl :capi :color)
   (:export
    #:cursed-pane
 
    ;; accessors
+   #:cursed-pane-pixmap
    #:cursed-pane-chars
    #:cursed-pane-chars-wide
    #:cursed-pane-chars-high
    #:cursed-pane-cursor-x
    #:cursed-pane-cursor-y
-   #:cursed-pane-cursor-visible-p
-
-   ;; methods
-   #:princ-to-pane
-   ))
+   #:cursed-pane-cursor-visible-p))
 
 (in-package :cursed)
 
-(defclass cursed-pane (output-pane)
-  ((chars)
+(defclass cursed-pane (output-pane stream:fundamental-character-output-stream)
+  ((pixmap :initform nil :reader cursed-pane-pixmap)
+   (chars  :initform nil :reader cursed-pane-chars)
 
    ;; the size of the pane
-   (chars-wide     :initarg :chars-wide     :initform 80 :reader cursed-pane-chars-wide)
-   (chars-high     :initarg :chars-high     :initform 24 :reader cursed-pane-chars-high)
+   (chars-wide :initarg :chars-wide :initform 80 :reader cursed-pane-chars-wide)
+   (chars-high :initarg :chars-high :initform 24 :reader cursed-pane-chars-high)
 
    ;; true if the cursor should be drawn
-   (cursor-visible :initarg :cursor-visible :initform t  :accessor cursed-pane-cursor-visible-p)
+   (cursor-visible :initarg :cursor-visible :initform t :accessor cursed-pane-cursor-visible-p)
 
    ;; xy location of the cursor
-   (cursor-x       :initarg :cursor-x       :initform 0  :accessor cursed-pane-cursor-x)
-   (cursor-y       :initarg :cursor-y       :initform 0  :accessor cursed-pane-cursor-y))
+   (cursor-x :initarg :cursor-x :initform 0 :accessor cursed-pane-cursor-x)
+   (cursor-y :initarg :cursor-y :initform 0 :accessor cursed-pane-cursor-y))
   (:default-initargs
    :background :black
    :foreground :gray90
+   :visible-border nil
    :font (gp:make-font-description :family "Courier" :size 12.0)
    :create-callback 'create-cursed-pane
+   :destroy-callback 'destroy-cursed-pane
+   :resize-callback 'resize-cursed-pane
    :display-callback 'display-cursed-pane))
-
-(defstruct glyph (char " ") bg fg)
 
 (defmethod create-cursed-pane ((pane cursed-pane))
   "Set the size of the pane and clear the output."
@@ -68,56 +67,129 @@
                                :visible-max-height (list 'character chars-high)))
 
     ;; allocate an array of strings for all the characters (column major)
-    (setf chars (make-array (list chars-wide chars-high) :element-type 'glyph))
+    (setf chars (make-array (list chars-wide chars-high) :initial-element #\space))))
 
-    ;; fill in the characters with default glyphs
-    (dotimes (x chars-wide)
-      (dotimes (y chars-high)
-        (setf (aref chars x y) (make-glyph))))))
+(defmethod destroy-cursed-pane ((pane cursed-pane))
+  "Free memory used by the pane."
+  (with-slots (pixmap)
+      pane
+    (when pixmap
+      (gp:destroy-pixmap-port pixmap))))
+
+(defmethod resize-cursed-pane ((pane cursed-pane) x y w h)
+  "Create the "
+  (declare (ignore x y))
+  (with-slots (pixmap)
+      pane
+    (when pixmap
+      (gp:destroy-pixmap-port pixmap))
+    (setf pixmap (gp:create-pixmap-port pane w h))))
 
 (defmethod display-cursed-pane ((pane cursed-pane) x y w h)
   "Redraw characters in the pane."
-  (with-slots (chars cursor-x cursor-y cursor-visible)
+  (with-slots (pixmap cursor-x cursor-y cursor-visible)
       pane
-    (let ((cw (gp:get-font-width pane))
+    (let ((cw (gp:get-font-average-width pane))
           (ch (gp:get-font-height pane))
-          (fd (gp:get-font-descent pane)))
+          (fa (gp:get-font-ascent pane)))
 
-      ;; erase the area that is to be redrawn
-      (gp:draw-rectangle pane x y w h :filled t :foreground (simple-pane-background pane))
+      ;; render the display
+      (when pixmap
+        (gp:draw-image pane (gp:make-image-from-port pixmap) 0 0))
 
-      ;; render the block cursor first
+      ;; render the block cursor over them
       (when cursor-visible
-        (gp:draw-rectangle pane (* cursor-x cw) (* cursor-y ch) (1+ cw) (1+ ch) :filled t))
+        (gp:draw-rectangle pane (* cursor-x cw) (+ (* cursor-y ch) fa 1) cw 3 :filled t)))))
 
-      ;; render all the characters in the area that needs redrawn
-      (flet ((blit-glyph (x y &aux (glyph (aref chars x y)))
-               (with-slots (char bg fg)
-                   glyph
-                 (when bg
-                   (gp:draw-rectangle pane (* x cw) (* y ch) (1+ cw) (1+ ch) :filled t :foreground bg))
-                 (gp:draw-string pane char (* x cw) (- (+ (* y ch) ch) fd) :foreground fg))))
-        (loop :for i :from (truncate x cw) :below (truncate (+ x w) cw) :do
-              (loop :for j :from (truncate y ch) :below (truncate (+ y h) ch) :do
-                    (blit-glyph i j)))))))
+(defmethod stream:stream-file-position ((pane cursed-pane))
+  "Return the current cursor position."
+  (list (cursed-pane-cursor-x pane)
+        (cursed-pane-cursor-y pane)))
 
-(defmethod princ-to-pane (value (pane cursed-pane) &key background foreground)
-  "Output a value at the current cursor position."
-  (with-slots (chars cursor-x cursor-y chars-wide chars-high)
+(defmethod (setf stream:stream-file-position) (new-pos (pane cursed-pane))
+  "Set the position of the cursor."
+  (destructuring-bind (x y)
+      new-pos
+    (setf (cursed-pane-cursor-x pane) x
+          (cursed-pane-cursor-y pane) y)))
+
+(defmethod stream:stream-clear-output ((pane cursed-pane))
+  "Wipe the pixmap."
+  (with-slots (pixmap)
       pane
-    (loop :for c :across (princ-to-string value)
-          :do (let ((glyph (aref chars cursor-x cursor-y)))
-                (setf (glyph-char glyph) (string c))
+    (let ((w (gp:port-width pixmap))
+          (h (gp:port-height pixmap)))
+      (apply-in-pane-process pane #'gp:draw-rectangle pixmap 0 0 w h :filled t))))
 
-                ;; optional color settings
-                (setf (glyph-bg glyph) background)
-                (setf (glyph-fg glyph) foreground)
+(defmethod stream:stream-force-output ((pane cursed-pane))
+  "Redraw, forcing output to take effect."
+  (apply-in-pane-process pane #'gp:invalidate-rectangle pane))
 
-                ;; advance the cursor
-                (when (>= (incf cursor-x) chars-wide)
-                  (if (>= (incf cursor-y) chars-high)
-                      (return nil)
-                    (setf cursor-x 0)))))
-    
-    ;; TODO: limit the redraw to only what needs to be done
-    (gp:invalidate-rectangle pane)))
+(defmethod stream:stream-output-width ((pane cursed-pane))
+  "Return the total number of columns."
+  (cursed-pane-chars-wide pane))
+
+(defmethod stream:stream-start-line-p ((pane cursed-pane))
+  "T if at the start of a newline."
+  (zerop (cursed-pane-cursor-x pane)))
+
+(defmethod stream:stream-terpri ((pane cursed-pane))
+  "Force a newline if not on one already."
+  (with-slots (cursor-x cursor-y)
+      pane
+    (unless (zerop cursor-x)
+      (incf cursor-y)
+      (setf cursor-x 0))))
+
+(defmethod stream:stream-write-char ((pane cursed-pane) char)
+  "Output a single character at the current cursor position."
+  (with-slots (pixmap (x cursor-x) (y cursor-y) chars-wide chars-high)
+      pane
+    (flet ((render ()
+             (let ((cw (gp:get-font-average-width pane))
+                   (ch (gp:get-font-height pane))
+                   (fa (gp:get-font-ascent pane)))
+               (gp:draw-string pixmap (string char) (* x cw) (+ (* y ch) fa) :font (simple-pane-font pane))
+
+               ;; advance the cursor (wrap lines)
+               (when (= (incf x) chars-wide)
+                 (when (= (incf y) chars-high)
+                   (setf y 0))
+                 (setf x 0)))))
+      (apply-in-pane-process pane #'render))))
+
+(defmethod stream:stream-write-string ((pane cursed-pane) string &optional (start 0) (end (length string)))
+  "Output a value at the current cursor position."
+  (with-slots (pixmap chars cursor-x cursor-y chars-wide chars-high)
+      pane
+    (flet ((render ()
+             (let ((cw (gp:get-font-average-width pane))
+                   (ch (gp:get-font-height pane))
+                   (fa (gp:get-font-ascent pane)))
+               (loop :with font := (simple-pane-font pane)
+                     :with i := start
+
+                     ;; stop when the entire string is consumed
+                     :while (< i end)
+
+                     ;; get the longest character string we can blit
+                     :for n := (min (- end i) (- chars-wide cursor-x))
+                     :for x := (* cursor-x cw)
+                     :for y := (* cursor-y ch)
+
+                     ;; render and update the index and cursor
+                     :do (let ((cs (subseq string i (incf i n))))
+                           (gp:draw-string pixmap cs x (+ y fa) :font font)
+
+                           ;; advance the cursor
+                           (when (= (incf cursor-x n) chars-wide)
+                             (if (= (incf cursor-y 1) chars-high)
+                                 (return nil)
+                               (setf cursor-x 0))))))))
+      (apply-in-pane-process pane #'render))))
+
+(defmethod stream:stream-write-sequence ((pane cursed-pane) seq start end)
+  "Write a sequence of things to the pane."
+  (flet ((render ()
+           (loop :for i :from start :below end :do (princ (aref seq i) pane))))
+    (apply-in-pane-process pane #'render)))
