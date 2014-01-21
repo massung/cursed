@@ -83,13 +83,13 @@
       pane
     (when pixmap
       (gp:destroy-pixmap-port pixmap))
-    (setf pixmap (gp:create-pixmap-port pane w h))))
+    (setf pixmap (gp:create-pixmap-port pane w h :background (simple-pane-background pane) :clear t))))
 
 (defmethod display-cursed-pane ((pane cursed-pane) x y w h)
   "Redraw characters in the pane."
   (with-slots (pixmap cursor-x cursor-y cursor-visible)
       pane
-    (let ((cw (gp:get-font-average-width pane))
+    (let ((cw (gp:get-font-width pane))
           (ch (gp:get-font-height pane))
           (fa (gp:get-font-ascent pane)))
 
@@ -146,7 +146,7 @@
   (with-slots (pixmap (x cursor-x) (y cursor-y) chars-wide chars-high)
       pane
     (flet ((render ()
-             (let ((cw (gp:get-font-average-width pane))
+             (let ((cw (gp:get-font-width pane))
                    (ch (gp:get-font-height pane))
                    (fa (gp:get-font-ascent pane)))
                (gp:draw-string pixmap (string char) (* x cw) (+ (* y ch) fa) :font (simple-pane-font pane))
@@ -163,7 +163,7 @@
   (with-slots (pixmap chars cursor-x cursor-y chars-wide chars-high)
       pane
     (flet ((render ()
-             (let ((cw (gp:get-font-average-width pane))
+             (let ((cw (gp:get-font-width pane))
                    (ch (gp:get-font-height pane))
                    (fa (gp:get-font-ascent pane)))
                (loop :with font := (simple-pane-font pane)
