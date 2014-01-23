@@ -29,7 +29,8 @@
    #:cursed-pane-chars-high
    #:cursed-pane-cursor-x
    #:cursed-pane-cursor-y
-   #:cursed-pane-cursor-visible-p))
+   #:cursed-pane-cursor-visible-p
+   #:cursed-pane-cursor-blink))
 
 (in-package :cursed)
 
@@ -43,6 +44,7 @@
 
    ;; true if the cursor should be drawn
    (cursor-visible :initarg :cursor-visible :initform t :accessor cursed-pane-cursor-visible-p)
+   (cursor-blink   :initarg :cursor-blink   :initform t :writer cursed-pane-cursor-blink)
 
    ;; xy location of the cursor
    (cursor-x :initarg :cursor-x :initform 0 :accessor cursed-pane-cursor-x)
@@ -61,7 +63,7 @@
 
 (defmethod create-cursed-pane ((pane cursed-pane))
   "Set the size of the pane and clear the output."
-  (with-slots (chars chars-wide chars-high)
+  (with-slots (chars chars-wide chars-high cursor-blink)
       pane
     (set-hint-table pane (list :visible-min-width (list 'character chars-wide)
                                :visible-max-width (list 'character chars-wide)
@@ -69,14 +71,43 @@
                                :visible-max-height (list 'character chars-high)))
 
     ;; allocate an array of strings for all the characters (column major)
-    (setf chars (make-string (* chars-wide chars-high) :initial-element #\space))))
+    (setf chars (make-string (* chars-wide chars-high) :initial-element #\space))
+
+    ;; start up a blink process for the cursor if requested
+    (when cursor-blink
+      (setf cursor-blink (mp:process-run-function "Cursed Pane Blink" '() #'blink-cursor pane)))))
 
 (defmethod destroy-cursed-pane ((pane cursed-pane))
   "Free memory used by the pane."
-  (with-slots (pixmap)
+  (with-slots (pixmap cursor-blink)
       pane
     (when pixmap
-      (gp:destroy-pixmap-port pixmap))))
+      (gp:destroy-pixmap-port pixmap))
+    (when cursor-blink
+      (mp:process-kill cursor-blink))))
+
+(defmethod blink-cursor ((pane cursed-pane))
+  "Periodically refresh the pane with the cursor visibility turned on and off."
+  (with-slots (cursor-visible)
+      pane
+    (loop (progn
+            ;; pause periodically between blinks
+            (mp:current-process-pause 0.5)
+
+            ;; toggle the visibility of the cursor
+            (setf cursor-visible (not cursor-visible))
+
+            ;; redraw the pane
+            (apply-in-pane-process pane #'gp:invalidate-rectangle pane)))))
+
+(defmethod (setf cursed-pane-cursor-blink) (blink-p (pane cursed-pane))
+  "Set the position of the cursor."
+  (with-slots (cursor-blink)
+      pane
+    (when cursor-blink
+      (mp:process-kill cursor-blink))
+    (when blink-p
+      (setf cursor-blink (mp:process-run-function "Cursed Pane Blink" '() #'blink-cursor pane)))))
 
 (defmethod resize-cursed-pane ((pane cursed-pane) x y w h)
   "Create the pixmap for the pane, destroy any currently existing one."
@@ -154,7 +185,7 @@
       (gp:draw-string pixmap (string char) (* x fw) (+ (* y fh) fa) :font (simple-pane-font pane))
 
       ;; bash the character buffer with the new char
-      (setf (aref chars x y) char)
+      (setf (aref chars (+ (* y chars-wide) x)) char)
 
       ;; advance the cursor (wrap lines)
       (when (= (incf x) chars-wide)
