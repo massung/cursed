@@ -1,7 +1,7 @@
 (defpackage :cursed-asd
   (:use :cl :asdf))
 
-(in-package :re-asd)
+(in-package :cursed-asd)
 
 (defsystem :cursed
   :name "cursed"
