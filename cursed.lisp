@@ -30,7 +30,10 @@
    #:cursed-pane-cursor-x
    #:cursed-pane-cursor-y
    #:cursed-pane-cursor-visible-p
-   #:cursed-pane-cursor-blink))
+   #:cursed-pane-cursor-blink
+
+   ;; macros
+   #:with-output-to-cursed-pane))
 
 (in-package :cursed)
 
@@ -60,6 +63,27 @@
    :resize-callback 'resize-cursed-pane
    :display-callback 'display-cursed-pane
    :input-model '()))
+
+(defmacro with-output-to-cursed-pane ((pane &key x y foreground background) &body body)
+  "Override current colors, force output."
+  (let ((fg (gensym))
+        (bg (gensym))
+        (cx (gensym))
+        (cy (gensym)))
+    `(let ((*standard-output* ,pane))
+       
+       ;; reposition the cursor
+       (lw:when-let (,cx ,x) (setf (cursed-pane-cursor-x *standard-output*) ,cx))
+       (lw:when-let (,cy ,y) (setf (cursed-pane-cursor-y *standard-output*) ,cy))
+
+       ;; temporarily set the foreground and background colors
+       (lw:when-let (,fg ,foreground) (setf (simple-pane-foreground *standard-output*) ,fg))
+       (lw:when-let (,bg ,background) (setf (simple-pane-background *standard-output*) ,bg))
+
+       ;; output to the pane
+       (unwind-protect
+           (progn ,@body)
+         (force-output *standard-output*)))))
 
 (defmethod create-cursed-pane ((pane cursed-pane))
   "Set the size of the pane and clear the output."
@@ -182,7 +206,9 @@
     (let ((fw (gp:get-font-average-width pane))
           (fh (gp:get-font-height pane))
           (fa (gp:get-font-ascent pane)))
-      (gp:draw-string pixmap (string char) (* x fw) (+ (* y fh) fa) :font (simple-pane-font pane))
+      (gp:with-graphics-state (pixmap :font (simple-pane-font pane) :foreground (simple-pane-foreground pane))
+        (gp:draw-rectangle pixmap (* x fw) (* y fh) fw fh :filled t :foreground (simple-pane-background pane))
+        (gp:draw-string pixmap (string char) (* x fw) (+ (* y fh) fa)))
 
       ;; bash the character buffer with the new char
       (setf (aref chars (+ (* y chars-wide) x)) char)
