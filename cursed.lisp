@@ -43,6 +43,7 @@
 
 (defclass cursed-pane (output-pane stream:fundamental-character-output-stream)
   ((pixmap :initform nil :reader cursed-pane-pixmap)
+   (bg     :initform nil :reader cursed-pane-background)
    (chars  :initform nil :reader cursed-pane-chars)
 
    ;; the size of the pane
@@ -78,10 +79,11 @@
        (lw:when-let (,cy ,y) (setf (cursed-pane-cursor-y *standard-output*) ,cy))
 
        ;; temporarily set the foreground and background colors
-       (gp:with-graphics-state ((slot-value ,pane 'pixmap) :foreground ,foreground :background ,background)
-         (unwind-protect
-             (progn ,@body)
-           (force-output *standard-output*))))))
+       (gp:with-graphics-state ((slot-value ,pane 'bg) ,@(when background `(:foreground ,background)))
+         (gp:with-graphics-state ((slot-value ,pane 'pixmap) ,@(when foreground `(:foreground ,foreground)))
+           (unwind-protect
+               (progn ,@body)
+             (force-output *standard-output*)))))))
 
 (defmethod create-cursed-pane ((pane cursed-pane))
   "Set the size of the pane and clear the output."
@@ -107,24 +109,35 @@
 (defmethod resize-cursed-pane ((pane cursed-pane) x y w h)
   "Create the pixmap for the pane, destroy any currently existing one."
   (declare (ignore x y))
-  (with-slots (pixmap)
+  (with-slots (pixmap bg)
       pane
 
-    ;; free the existing port
+    ;; free the existing pixmaps
     (when pixmap
       (gp:destroy-pixmap-port pixmap))
+    (when bg
+      (gp:destroy-pixmap-port bg))
 
     ;; create a new pixmap port to render all the characters to
-    (setf pixmap (gp:create-pixmap-port pane w h
-                                        :clear t
-                                        :foreground (simple-pane-foreground pane)
-                                        :background (simple-pane-background pane)))))
+    (let ((foreground (simple-pane-foreground pane))
+          (background (simple-pane-background pane)))
+      (setf bg (gp:create-pixmap-port pane w h :clear t :foreground background :background background)
+            pixmap (gp:create-pixmap-port pane w h :clear t :foreground foreground :background :transparent))
+
+      ;; set the font of the pixmap port
+      (setf (gp:graphics-state-font (gp:get-graphics-state pixmap)) (simple-pane-font pane)))))
 
 (defmethod display-cursed-pane ((pane cursed-pane) x y w h)
   "Redraw characters in the pane."
-  (with-slots (pixmap cursor-x cursor-y cursor-visible)
+  (with-slots (bg pixmap cursor-x cursor-y cursor-visible)
       pane
     (when pixmap
+      ;; render the background
+      (gp:draw-image pane (gp:make-image-from-port bg) x y :from-x x :from-y y :to-width w :to-heigh h)
+
+      ;; TODO: render the selection
+
+      ;; render the text
       (gp:draw-image pane (gp:make-image-from-port pixmap) x y :from-x x :from-y y :to-width w :to-height h))
 
     ;; render the cursor over the text
@@ -136,32 +149,51 @@
 
 (defmethod cursed-pane-scroll ((pane cursed-pane))
   "Scroll all the characters on the pane. The cursor does not move."
-  (with-slots (chars chars-wide chars-high pixmap)
+  (with-slots (bg pixmap chars chars-wide chars-high cursor-x)
       pane
     (let ((w (gp:port-width pane))
           (h (gp:port-height pane)))
-      (gp:with-graphics-state (pixmap :foreground (simple-pane-background pane))
-        (gp:draw-image pixmap (gp:make-image-from-port pixmap) 0 0 :from-y (gp:get-font-height pane))
+      (gp:draw-image bg (gp:make-image-from-port bg) 0 0 :from-y (gp:get-font-height pane))
 
-        ;; draw a new line at the bottom
-        (gp:draw-rectangle pixmap 0 h w (- (gp:get-font-height pane)) :filled t))
+      ;; because the background is transparent we need to create a new pixmap to render to
+      (let* ((gs (gp:get-graphics-state pixmap))
+             (fg (gp:graphics-state-foreground gs))
+             (np (gp:create-pixmap-port pane w h :clear t :foreground fg :background :transparent)))
+        (gp:draw-image np (gp:make-image-from-port pixmap) 0 0 :from-y (gp:get-font-height pane))
+
+        ;; set the font for the new pixmap
+        (setf (gp:graphics-state-font (gp:get-graphics-state np)) (gp:graphics-state-font gs))
+
+        ;; delete the old one and set it
+        (gp:destroy-pixmap-port pixmap)
+
+        ;; assign the new one
+        (setf pixmap np))
+
+      ;; clear the background of the bottom line
+      (gp:draw-rectangle bg 0 h w (- (gp:get-font-height pane)) :filled t)
 
       ;; update the characters
-      (setf chars (lw:string-append (subseq chars 0 (* chars-wide (1- chars-high)))
-                                    (make-string chars-wide  :initial-element #\space)))
+      (let ((shifted-chars (subseq chars 0 (* chars-wide (1- chars-high))))
+            (new-line (make-string chars-wide  :initial-element #\space)))
+        (setf chars (concatenate 'string shifted-chars new-line)))
+
+      ;; move the cursor to the beginning of the line
+      (setf cursor-x 0)
 
       ;; force redraw
       (gp:invalidate-rectangle pane))))
 
 (defmethod cursed-pane-clear ((pane cursed-pane))
   "Wipe the pane."
-  (with-slots (pixmap chars cursor-x cursor-y chars-wide chars-high)
+  (with-slots (bg pixmap chars cursor-x cursor-y chars-wide chars-high)
       pane
     (setf chars (make-string (* chars-wide chars-high) :initial-element #\space))
 
     ;; clear the pixmap port
     (let ((w (gp:port-width pane))
           (h (gp:port-height pane)))
+      (gp:draw-rectangle bg 0 0 w h :filled t :foreground (simple-pane-background pane))
       (gp:draw-rectangle pixmap 0 0 w h :filled t :foreground (simple-pane-background pane)))
 
     ;; put the cursor back at the top
@@ -196,10 +228,11 @@
 
 (defmethod stream:stream-clear-output ((pane cursed-pane))
   "Wipe the pixmap."
-  (with-slots (pixmap chars chars-wide chars-high)
+  (with-slots (bg pixmap chars chars-wide chars-high)
       pane
     (let ((w (gp:port-width pixmap))
           (h (gp:port-height pixmap)))
+      (gp:draw-rectangle bg 0 0 w h :filled t)
       (gp:draw-rectangle pixmap 0 0 w h :filled t)
 
       ;; wipe the character buffer
@@ -229,7 +262,7 @@
 
 (defmethod stream:stream-write-char ((pane cursed-pane) char)
   "Output a single character at the current cursor position."
-  (with-slots (pixmap chars (x cursor-x) (y cursor-y) chars-wide)
+  (with-slots (bg pixmap chars (x cursor-x) (y cursor-y) chars-wide)
       pane
     (case char
       (#\return    (setf x 0))
@@ -252,7 +285,8 @@
        (let ((fw (gp:get-font-average-width pane))
              (fh (gp:get-font-height pane))
              (fa (gp:get-font-ascent pane)))
-         (gp:draw-string pixmap (string char) (* x fw) (+ (* y fh) fa) :block t :font (simple-pane-font pane)))
+         (gp:draw-rectangle bg (* x fw) (* y fh) fw fh :filled t)
+         (gp:draw-character pixmap char (* x fw) (+ (* y fh) fa) :block t))
 
        ;; advance the cursor (wrap lines)
        (when (>= (incf x) chars-wide)
