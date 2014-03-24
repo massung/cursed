@@ -42,9 +42,14 @@
 (defconstant +default-cursed-font-desc+ (gp:make-font-description :family "Courier New" :size 13.0)
   "The default font for all cursed panes.")
 
+(defstruct (cursed-font-metrics (:conc-name cursed-font-))
+  "Cached metrics for a font on a cursed pane."
+  width height ascent)
+
 (defclass cursed-pane (output-pane stream:fundamental-character-output-stream)
-  ((pixmap :initform nil :reader cursed-pane-pixmap)
-   (chars  :initform nil :reader cursed-pane-chars)
+  ((pixmap  :initform nil :reader cursed-pane-pixmap)
+   (chars   :initform nil :reader cursed-pane-chars)
+   (metrics :initform nil :reader cursed-pane-font-metrics)
 
    ;; the size of the pane
    (chars-wide :initarg :chars-wide :initform 80 :reader cursed-pane-chars-wide)
@@ -65,6 +70,8 @@
    :foreground :gray90
    :visible-border nil
    :draw-with-buffer t
+   :visible-max-width t
+   :visible-max-height t
    :font +default-cursed-font-desc+
    :create-callback 'create-cursed-pane
    :destroy-callback 'destroy-cursed-pane
@@ -93,17 +100,22 @@
 
 (defmethod create-cursed-pane ((pane cursed-pane))
   "Set the size of the pane and clear the output."
-  (with-slots (chars chars-wide chars-high)
+  (with-slots (metrics chars chars-wide chars-high)
       pane
-    (let ((char-width (gp:get-font-average-width pane))
-          (char-height (gp:get-font-height pane)))
-      (set-hint-table pane (list :visible-min-width (* char-width chars-wide)
-                                 :visible-max-width (* char-width chars-wide)
-                                 :visible-min-height (* char-height chars-high)
-                                 :visible-max-height (* char-height chars-high))))
+    (multiple-value-bind (left top right bottom)
+        (gp:get-character-extent pane #\W)
 
-    ;; allocate an array of strings for all the characters (column major)
-    (setf chars (make-string (* chars-wide chars-high) :initial-element #\space))))
+      ;; save off the metrics so we don't need to compute them all the time
+      (setf metrics (make-cursed-font-metrics :width (- right left)
+                                              :height (- bottom top 1)
+                                              :ascent (gp:get-font-ascent pane)))
+
+      ;; resize the pane using the hint table
+      (set-hint-table pane (list :visible-min-width (* (cursed-font-width metrics) chars-wide)
+                                 :visible-min-height (* (cursed-font-height metrics) chars-high)))
+
+      ;; allocate an array of strings for all the characters (column major)
+      (setf chars (make-string (* chars-wide chars-high) :initial-element #\space)))))
 
 (defmethod destroy-cursed-pane ((pane cursed-pane))
   "Free memory used by the pane."
@@ -132,15 +144,15 @@
 
 (defmethod display-cursed-pane ((pane cursed-pane) x y w h)
   "Redraw characters in the pane."
-  (with-slots (pixmap cursor-x cursor-y cursor-visible sel-start sel-end chars chars-wide)
+  (with-slots (metrics pixmap cursor-x cursor-y cursor-visible sel-start sel-end chars chars-wide)
       pane
     (when pixmap
       (gp:draw-image pane (gp:make-image-from-port pixmap) x y :from-x x :from-y y :to-width w :to-height h))
 
-    ;; font settings
-    (let ((fw (gp:get-font-average-width pixmap))
-          (fh (gp:get-font-height pixmap))
-          (fa (gp:get-font-ascent pixmap)))
+    ;; font metrics
+    (let ((fw (cursed-font-width metrics))
+          (fh (cursed-font-height metrics))
+          (fa (cursed-font-ascent metrics)))
 
       ;; render the selected text
       (when (and sel-start sel-end)
@@ -148,10 +160,10 @@
           (loop :with start := (min sel-start sel-end)
                 :with end := (max sel-start sel-end)
                 :with i := start
-                :while (< i end)
+                :while (<= i end)
                 :for y := (truncate i chars-wide)
                 :for x := (- i (* y chars-wide))
-                :for n := (min (- chars-wide x) (- end i))
+                :for n := (min (- chars-wide x) (- (1+ end) i))
                 :do (gp:draw-string pane chars (* x fw) (+ (* y fh) fa) :block t :start i :end (incf i n)))))
 
       ;; render the cursor over the text
@@ -160,11 +172,11 @@
 
 (defmethod click-cursed-pane ((pane cursed-pane) x y &optional drag)
   "Position the cursor from a click."
-  (with-slots (sel-start sel-end cursor-visible chars-wide chars-high)
+  (with-slots (metrics sel-start sel-end cursor-visible chars-wide chars-high)
       pane
     (when cursor-visible
-      (let ((x (truncate x (gp:get-font-average-width pane)))
-            (y (truncate y (gp:get-font-height pane))))
+      (let ((x (truncate x (cursed-font-width metrics)))
+            (y (truncate y (cursed-font-height metrics))))
 
         ;; only update if within the pane
         (when (and (<= 0 x (1- chars-wide))
@@ -185,22 +197,18 @@
 
 (defmethod cursed-pane-scroll ((pane cursed-pane))
   "Scroll all the characters on the pane. The cursor does not move."
-  (with-slots (pixmap chars chars-wide chars-high cursor-x)
+  (with-slots (metrics pixmap chars chars-wide)
       pane
     (let ((w (gp:port-width pane))
           (h (gp:port-height pane)))
-      (gp:draw-image pixmap (gp:make-image-from-port pixmap) 0 0 :from-y (gp:get-font-height pixmap))
+      (gp:draw-image pixmap (gp:make-image-from-port pixmap) 0 0 :from-y (1- (gp:get-font-height pixmap)))
 
       ;; clear the background of the bottom line
-      (gp:draw-rectangle pixmap 0 h w (- (gp:get-font-height pane)) :filled t)
+      (gp:draw-rectangle pixmap 0 h w (- (cursed-font-height metrics)) :filled t)
 
       ;; update the characters
-      (let ((shifted-chars (subseq chars 0 (* chars-wide (1- chars-high))))
-            (new-line (make-string chars-wide  :initial-element #\space)))
-        (setf chars (concatenate 'string shifted-chars new-line)))
-
-      ;; move the cursor to the beginning of the line
-      (setf cursor-x 0)
+      (let ((new-line (make-string chars-wide  :initial-element #\space)))
+        (setf chars (concatenate 'string (subseq chars chars-wide) new-line)))
 
       ;; force redraw
       (gp:invalidate-rectangle pane))))
@@ -301,7 +309,7 @@
 
 (defmethod stream:stream-write-char ((pane cursed-pane) char)
   "Output a single character at the current cursor position."
-  (with-slots (pixmap chars (x cursor-x) (y cursor-y) chars-wide chars-high)
+  (with-slots (metrics pixmap chars (x cursor-x) (y cursor-y) chars-wide chars-high)
       pane
     (when (and (<= 0 x (1- chars-wide))
                (<= 0 y (1- chars-high)))
@@ -324,9 +332,9 @@
         (otherwise   (setf (aref chars (+ (* y chars-wide) x)) char)
                      
                      ;; render to the pixmap
-                     (let ((fw (gp:get-font-average-width pixmap))
-                           (fh (gp:get-font-height pixmap))
-                           (fa (gp:get-font-ascent pixmap)))
+                     (let ((fw (cursed-font-width metrics))
+                           (fh (cursed-font-height metrics))
+                           (fa (cursed-font-ascent metrics)))
                        (gp:draw-character pixmap char (* x fw) (+ (* y fh) fa) :block t))
                      
                      ;; advance the cursor (wrap lines)
