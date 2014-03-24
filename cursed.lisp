@@ -145,10 +145,14 @@
       ;; render the selected text
       (when (and sel-start sel-end)
         (gp:with-graphics-state (pane :foreground :color_highlighttext :background :color_highlight)
-          (loop :for i :from (min sel-start sel-end) :to (max sel-start sel-end)
+          (loop :with start := (min sel-start sel-end)
+                :with end := (max sel-start sel-end)
+                :with i := start
+                :while (< i end)
                 :for y := (truncate i chars-wide)
                 :for x := (- i (* y chars-wide))
-                :do (gp:draw-character pane (char chars i) (* x fw) (+ (* y fh) fa) :block t))))
+                :for n := (min (- chars-wide x) (- end i))
+                :do (gp:draw-string pane chars (* x fw) (+ (* y fh) fa) :block t :start i :end (incf i n)))))
 
       ;; render the cursor over the text
       (when cursor-visible
