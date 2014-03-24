@@ -168,7 +168,7 @@
 
       ;; render the cursor over the text
       (when cursor-visible
-        (gp:draw-rectangle pane (* cursor-x fw) (+ (* cursor-y fh) fa) fw 3 :filled t)))))
+        (gp:draw-rectangle pane (1+ (* cursor-x fw)) (+ (* cursor-y fh) fa) (- fw 2) 3 :filled t)))))
 
 (defmethod click-cursed-pane ((pane cursed-pane) x y &optional drag)
   "Position the cursor from a click."
