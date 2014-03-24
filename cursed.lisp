@@ -384,11 +384,8 @@
         ;; backup the cursor
         (#\backspace (setf x (max (1- x) 0)))
         
-        ;; advance the cursor
-        (#\tab       (when (>= (setf x (if (zerop (logand x 7))
-                                           (+ x 8)
-                                         (1- (logand 8 (+ x 7))))) chars-wide)
-                       (terpri pane)))
+        ;; advance the cursor to the next column marker
+        (#\tab       (loop :for i :from x :below (+ (logand x 8) 8) :do (write-char #\space pane)))
         
         ;; all other characters are written
         (otherwise   (setf (aref chars (+ (* y chars-wide) x)) char)
