@@ -41,7 +41,7 @@ The cursor can also be toggled on and off with the `cursed-pane-cursor-visible-p
 
 You can use the `with-output-to-cursed-pane` macro to quickly position the cursor, render, and force output. The macro will also allow you to temporarily change the foreground and background colors of the pane as well.
 
-	CL-USER > (with-output-to-cursed-pane (c :y 20 :foreground :red)
+	CL-USER > (with-output-to-cursed-pane (c :x 0 :y 20 :foreground :red :background :blue)
 	            (loop for i from 1 to 10 do (print (* i i))))
 	NIL
 	
@@ -49,4 +49,10 @@ You can use the `with-output-to-cursed-pane` macro to quickly position the curso
 
 The above example shows that the cursed pane will also scroll. There is no history, however. You can force the pane to scroll a single line using `cursed-pane-scroll`.
 
-It is also possible to completely clear the pane with `cursed-pane-clear`. This will also reposition the cursor back to <0,0>.
+It is also possible to completely clear the pane with `cursed-pane-clear`. This will also re-position the cursor back to <0,0>.
+
+It is possible to use the mouse when `cursed-pane-selection-visible-p` is set the `T` to select regions of the pane. The selection can also be inspected and adjusted with `cursed-pane-selection-start` and `cursed-pane-selection-end` (both are `setf`-able). These are set similarly to `file-position`.
+
+![Selection](https://raw.github.com/massung/cursed/master/screenshots/cursed-pane-05.png)
+
+The selection can be copied to the clipboard with `cursed-pane-copy`. Note, however, that newlines are not tracked so a block of text is what will be in the clipboard.
