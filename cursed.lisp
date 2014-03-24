@@ -33,6 +33,9 @@
    #:cursed-pane-cursor-x
    #:cursed-pane-cursor-y
    #:cursed-pane-cursor-visible-p
+   #:cursed-pane-selection-visible-p
+   #:cursed-pane-selection-start
+   #:cursed-pane-selection-end
    #:cursed-pane-scroll
    #:cursed-pane-clear
    #:cursed-pane-copy))
@@ -55,9 +58,12 @@
    (chars-wide :initarg :chars-wide :initform 80 :reader cursed-pane-chars-wide)
    (chars-high :initarg :chars-high :initform 24 :reader cursed-pane-chars-high)
 
+   ;; non-nil if the selection should be drawn
+   (sel-visible :initarg :selection-visible :initform t :reader cursed-pane-selection-visible-p)
+
    ;; selected text
-   (sel-start :initform nil :reader cursed-pane-selection-start)
-   (sel-end   :initform nil :reader cursed-pane-selection-end)
+   (sel-start :initform nil)
+   (sel-end   :initform nil)
 
    ;; non-nil if the cursor should be drawn
    (cursor-visible :initarg :cursor-visible :initform t :reader cursed-pane-cursor-visible-p)
@@ -144,7 +150,7 @@
 
 (defmethod display-cursed-pane ((pane cursed-pane) x y w h)
   "Redraw characters in the pane."
-  (with-slots (metrics pixmap cursor-x cursor-y cursor-visible sel-start sel-end chars chars-wide)
+  (with-slots (metrics pixmap cursor-x cursor-y cursor-visible sel-visible sel-start sel-end chars chars-wide)
       pane
     (when pixmap
       (gp:draw-image pane (gp:make-image-from-port pixmap) x y :from-x x :from-y y :to-width w :to-height h))
@@ -155,7 +161,7 @@
           (fa (cursed-font-ascent metrics)))
 
       ;; render the selected text
-      (when (and sel-start sel-end)
+      (when (and sel-visible sel-start sel-end)
         (gp:with-graphics-state (pane :foreground :color_highlighttext :background :color_highlight)
           (loop :with start := (min sel-start sel-end)
                 :with end := (max sel-start sel-end)
@@ -170,30 +176,86 @@
       (when cursor-visible
         (gp:draw-rectangle pane (1+ (* cursor-x fw)) (+ (* cursor-y fh) fa) (- fw 2) 3 :filled t)))))
 
-(defmethod click-cursed-pane ((pane cursed-pane) x y &optional drag)
+(defmethod click-cursed-pane ((pane cursed-pane) x y)
   "Position the cursor from a click."
-  (with-slots (metrics sel-start sel-end cursor-visible chars-wide chars-high)
+  (declare (ignore x y))
+  (with-slots (sel-start sel-end)
       pane
-    (when cursor-visible
-      (let ((x (truncate x (cursed-font-width metrics)))
-            (y (truncate y (cursed-font-height metrics))))
+    (when (or sel-start sel-end)
+      (setf sel-start nil sel-end nil)
 
-        ;; only update if within the pane
-        (when (and (<= 0 x (1- chars-wide))
-                   (<= 0 y (1- chars-high)))
-
-          ;; update the selection
-          (let ((pos (+ (* y chars-wide) x)))
-            (if drag
-                (setf sel-end pos)
-              (setf sel-start pos sel-end nil)))
-
-          ;; update the position in the stream
-          (file-position pane (list x y)))))))
+      ;; redraw with no selection
+      (gp:invalidate-rectangle pane))))
 
 (defmethod drag-cursed-pane ((pane cursed-pane) x y)
   "Drag the cursor, extend the current selection."
-  (click-cursed-pane pane x y t))
+  (with-slots (metrics sel-start sel-end chars-wide chars-high)
+      pane
+    (let ((x (truncate x (cursed-font-width metrics)))
+          (y (truncate y (cursed-font-height metrics))))
+
+      ;; only update if within the pane
+      (when (and (<= 0 x (1- chars-wide))
+                 (<= 0 y (1- chars-high)))
+
+        ;; update the selection
+        (setf sel-end (+ (* y chars-wide) x))
+
+        ;; start need set too?
+        (unless sel-start
+          (setf sel-start sel-end))
+
+        ;; redraw with the new selection
+        (gp:invalidate-rectangle pane)))))
+
+(defmethod (setf cursed-pane-selection-visible-p) (visible-p (pane cursed-pane))
+  "Set whether or not the selection is visible."
+  (setf (slot-value pane 'sel-visible) visible-p)
+
+  ;; redraw with (or without) the selection
+  (gp:invalidate-rectangle pane))
+
+(defmethod cursed-pane-selection-start ((pane cursed-pane))
+  "Return the (x y) coordinates where the selection starts or nil if not set."
+  (with-slots (sel-start chars-wide)
+      pane
+    (and sel-start (let ((y (truncate sel-start chars-wide)))
+                     (list (- sel-start (* y chars-wide)) y)))))
+
+(defmethod (setf cursed-pane-selection-start) (pos (pane cursed-pane))
+  "Set the selection start position. Can be NIL."
+  (with-slots (sel-start chars-wide chars-high)
+      pane
+    (setf sel-start (when pos
+                      (destructuring-bind (x y)
+                          pos
+                        (when (and (<= 0 x (1- chars-wide))
+                                   (<= 0 y (1- chars-high)))
+                          (+ (* y chars-wide) x)))))
+
+    ;; redraw with the selection
+    (gp:invalidate-rectangle pane)))
+                      
+(defmethod cursed-pane-selection-end ((pane cursed-pane))
+  "Return the (x y) coordinates where the selection ends or nil if not set."
+  (with-slots (sel-end chars-wide)
+      pane
+    (and sel-end (let ((y (truncate sel-end chars-wide)))
+                   (list (- sel-end (* y chars-wide)) y)))))
+
+(defmethod (setf cursed-pane-selection-end) (pos (pane cursed-pane))
+  "Set the selection end position. Can be NIL."
+  (with-slots (sel-end chars-wide chars-high)
+      pane
+    (setf sel-end (when pos
+                    (destructuring-bind (x y)
+                        pos
+                      (when (and (<= 0 x (1- chars-wide))
+                                 (<= 0 y (1- chars-high)))
+                        (+ (* y chars-wide) x)))))
+    
+    ;; redraw with the selection
+    (gp:invalidate-rectangle pane)))
 
 (defmethod cursed-pane-scroll ((pane cursed-pane))
   "Scroll all the characters on the pane. The cursor does not move."
