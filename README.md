@@ -27,7 +27,6 @@ You can use the `cursed-pane-cursor-x` and `cursed-pane-cursor-y` accessor metho
 	(13 0)
 	
 	CL-USER > (file-position c '(20 10))
-	10
 	
 	CL-USER > (format c "[~{~a~^, ~}]" '(this is a test))
 	NIL
@@ -41,7 +40,7 @@ The cursor can also be toggled on and off with the `cursed-pane-cursor-visible-p
 
 You can use the `with-output-to-cursed-pane` macro to quickly position the cursor, render, and force output. The macro will also allow you to temporarily change the foreground and background colors of the pane as well.
 
-	CL-USER > (with-output-to-cursed-pane (c :x 0 :y 20 :foreground :red :background :blue)
+	CL-USER > (with-output-to-cursed-pane (c :x 0 :y 20 :foreground :yellow :background :blue)
 	            (loop for i from 1 to 10 do (print (* i i))))
 	NIL
 	
@@ -56,3 +55,5 @@ It is possible to use the mouse when `cursed-pane-selection-visible-p` is set th
 ![Selection](https://raw.github.com/massung/cursed/master/screenshots/cursed-pane-05.png)
 
 The selection can be copied to the clipboard with `cursed-pane-copy`. Note, however, that newlines are not tracked so a block of text is what will be in the clipboard.
+
+Text from the clipboard can be pasted into the pane with `cursed-pane-paste`.

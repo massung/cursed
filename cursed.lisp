@@ -38,47 +38,48 @@
    #:cursed-pane-selection-end
    #:cursed-pane-scroll
    #:cursed-pane-clear
-   #:cursed-pane-copy))
+   #:cursed-pane-copy
+   #:cursed-pane-paste))
 
 (in-package :cursed)
 
-(defconstant +default-cursed-font-desc+ (gp:make-font-description :family "Courier New" :size 13.0)
-  "The default font for all cursed panes.")
-
-(defstruct (cursed-font-metrics (:conc-name cursed-font-))
-  "Cached metrics for a font on a cursed pane."
-  width height ascent)
+(defstruct (cursed-font-metrics (:conc-name cursed-font-) (:constructor make-cursed-font (pane)))
+  "Cached metrics for drawing."
+  (width  (gp:get-font-width pane))
+  (height (gp:get-font-height pane))
+  (ascent (gp:get-font-ascent pane))
+  (indent (- (gp:get-font-average-width pane)
+             (gp:get-font-width pane))))
 
 (defclass cursed-pane (output-pane stream:fundamental-character-output-stream)
-  ((pixmap  :initform nil :reader cursed-pane-pixmap)
-   (chars   :initform nil :reader cursed-pane-chars)
-   (metrics :initform nil :reader cursed-pane-font-metrics)
+  ((chars-wide     :initform 80  :reader cursed-pane-chars-wide          :initarg :chars-wide)
+   (chars-high     :initform 24  :reader cursed-pane-chars-high          :initarg :chars-high)
 
-   ;; the size of the pane
-   (chars-wide :initarg :chars-wide :initform 80 :reader cursed-pane-chars-wide)
-   (chars-high :initarg :chars-high :initform 24 :reader cursed-pane-chars-high)
-
-   ;; non-nil if the selection should be drawn
-   (sel-visible :initarg :selection-visible :initform t :reader cursed-pane-selection-visible-p)
-
-   ;; selected text
-   (sel-start :initform nil)
-   (sel-end   :initform nil)
-
-   ;; non-nil if the cursor should be drawn
-   (cursor-visible :initarg :cursor-visible :initform t :reader cursed-pane-cursor-visible-p)
+   ;; optional visibility setings
+   (sel-visible    :initform t   :reader cursed-pane-selection-visible-p :initarg :selection-visible)
+   (cursor-visible :initform t   :reader cursed-pane-cursor-visible-p    :initarg :cursor-visible)
 
    ;; x,y location of the cursor
-   (cursor-x :initarg :cursor-x :initform 0 :accessor cursed-pane-cursor-x)
-   (cursor-y :initarg :cursor-y :initform 0 :accessor cursed-pane-cursor-y))
+   (cursor-x       :initform 0   :reader cursed-pane-cursor-x            :initarg :cursor-x)
+   (cursor-y       :initform 0   :reader cursed-pane-cursor-y            :initarg :cursor-y)
+
+   ;; cached information
+   (bg-pixmap      :initform nil :reader cursed-pane-bg-pixmap)
+   (fg-pixmap      :initform nil :reader cursed-pane-fg-pixmap)
+   (chars          :initform nil :reader cursed-pane-chars)
+   (metrics        :initform nil :reader cursed-pane-font-metrics)
+
+   ;; selected text
+   (sel-start      :initform nil)
+   (sel-end        :initform nil))
   (:default-initargs
    :background :black
    :foreground :gray90
-   :visible-border nil
    :draw-with-buffer t
+   :visible-border nil
    :visible-max-width t
    :visible-max-height t
-   :font +default-cursed-font-desc+
+   :font (gp:make-font-description :family "Courier" :size 13.0)
    :create-callback 'create-cursed-pane
    :destroy-callback 'destroy-cursed-pane
    :resize-callback 'resize-cursed-pane
@@ -97,84 +98,98 @@
        (lw:when-let (,cy ,y) (setf (cursed-pane-cursor-y *standard-output*) ,cy))
 
        ;; temporarily set the foreground and background colors
-       (gp:with-graphics-state ((slot-value ,pane 'pixmap)
-                                ,@(when background `(:background ,background))
-                                ,@(when foreground `(:foreground ,foreground)))
-         (unwind-protect
-             (progn ,@body)
-           (force-output *standard-output*))))))
+       (gp:with-graphics-state ((slot-value ,pane 'bg-pixmap) ,@(when background `(:foreground ,background)))
+         (gp:with-graphics-state ((slot-value ,pane 'fg-pixmap) ,@(when foreground `(:foreground ,foreground)))
+           (unwind-protect
+               (progn ,@body)
+             (force-output *standard-output*)))))))
 
 (defmethod create-cursed-pane ((pane cursed-pane))
   "Set the size of the pane and clear the output."
   (with-slots (metrics chars chars-wide chars-high)
       pane
-    (multiple-value-bind (left top right bottom)
-        (gp:get-character-extent pane #\W)
+    (setf metrics (make-cursed-font pane))
 
-      ;; save off the metrics so we don't need to compute them all the time
-      (setf metrics (make-cursed-font-metrics :width (- right left)
-                                              :height (- bottom top 1)
-                                              :ascent (gp:get-font-ascent pane)))
+    ;; resize the pane using the hint table
+    (set-hint-table pane (list :visible-min-width (* (cursed-font-width metrics) chars-wide)
+                               :visible-min-height (* (cursed-font-height metrics) chars-high)))
 
-      ;; resize the pane using the hint table
-      (set-hint-table pane (list :visible-min-width (* (cursed-font-width metrics) chars-wide)
-                                 :visible-min-height (* (cursed-font-height metrics) chars-high)))
-
-      ;; allocate an array of strings for all the characters (column major)
-      (setf chars (make-string (* chars-wide chars-high) :initial-element #\space)))))
+    ;; allocate an array of strings for all the characters (column major)
+    (setf chars (make-string (* chars-wide chars-high) :initial-element #\space))))
 
 (defmethod destroy-cursed-pane ((pane cursed-pane))
   "Free memory used by the pane."
-  (with-slots (pixmap)
+  (with-slots (bg-pixmap fg-pixmap)
       pane
-    (when pixmap
-      (gp:destroy-pixmap-port pixmap))))
+    (when bg-pixmap
+      (gp:destroy-pixmap-port bg-pixmap))
+    (when fg-pixmap
+      (gp:destroy-pixmap-port fg-pixmap))))
 
 (defmethod resize-cursed-pane ((pane cursed-pane) x y w h)
   "Create the pixmap for the pane, destroy any currently existing one."
   (declare (ignore x y))
-  (with-slots (pixmap)
+  (with-slots (bg-pixmap fg-pixmap)
       pane
 
     ;; free the existing pixmaps
-    (when pixmap
-      (gp:destroy-pixmap-port pixmap))
+    (when bg-pixmap
+      (gp:destroy-pixmap-port bg-pixmap))
+    (when fg-pixmap
+      (gp:destroy-pixmap-port fg-pixmap))
 
     ;; create a new pixmap port to render all the characters to
     (let ((foreground (simple-pane-foreground pane))
           (background (simple-pane-background pane)))
-      (setf pixmap (gp:create-pixmap-port pane w h :clear t :foreground foreground :background background))
+      (setf bg-pixmap (gp:create-pixmap-port pane w h :clear t :foreground background :background background))
+      (setf fg-pixmap (gp:create-pixmap-port pane w h :clear t :foreground foreground :background :transparent))
 
-      ;; set the font of the pixmap port
-      (setf (gp:graphics-state-font (gp:get-graphics-state pixmap)) (simple-pane-font pane)))))
+      ;; set the font of the foreground pixmap port
+      (setf (gp:graphics-state-font (gp:get-graphics-state fg-pixmap)) (simple-pane-font pane)))))
 
 (defmethod display-cursed-pane ((pane cursed-pane) x y w h)
   "Redraw characters in the pane."
-  (with-slots (metrics pixmap cursor-x cursor-y cursor-visible sel-visible sel-start sel-end chars chars-wide)
+  (with-slots (metrics bg-pixmap fg-pixmap cursor-x cursor-y cursor-visible sel-visible sel-start sel-end chars-wide)
       pane
-    (when pixmap
-      (gp:draw-image pane (gp:make-image-from-port pixmap) x y :from-x x :from-y y :to-width w :to-height h))
-
-    ;; font metrics
     (let ((fw (cursed-font-width metrics))
           (fh (cursed-font-height metrics))
           (fa (cursed-font-ascent metrics)))
 
-      ;; render the selected text
+      ;; draw the background
+      (when bg-pixmap
+        (gp:draw-image pane (gp:make-image-from-port bg-pixmap) x y :from-x x :from-y y :to-width w :to-height h))
+
+      ;; if the selection is visible, render it over the background
       (when (and sel-visible sel-start sel-end)
-        (gp:with-graphics-state (pane :foreground :color_highlighttext :background :color_highlight)
-          (loop :with start := (min sel-start sel-end)
-                :with end := (max sel-start sel-end)
-                :with i := start
-                :while (<= i end)
-                :for y := (truncate i chars-wide)
-                :for x := (- i (* y chars-wide))
-                :for n := (min (- chars-wide x) (- (1+ end) i))
-                :do (gp:draw-string pane chars (* x fw) (+ (* y fh) fa) :block t :start i :end (incf i n)))))
+        (let* ((start (min sel-start sel-end))
+               (end (max sel-start sel-end))
+
+               ;; line and character positions
+               (line-start (truncate start chars-wide))
+               (line-end (truncate end chars-wide))
+               (char-start (- start (* line-start chars-wide)))
+               (char-end (- end (* line-end chars-wide)))
+
+               ;; bounding area of selected text
+               (x1 (* char-start fw))
+               (x2 (* (1+ char-end) fw))
+               (y1 (* line-start fh))
+               (y2 (* (1+ line-end) fh)))
+          (gp:with-graphics-state (pane :foreground :color_highlight)
+            (if (= line-start line-end)
+                (gp:draw-rectangle pane x1 y1 (- x2 x1) (- y2 y1) :filled t)
+              (progn
+                (gp:draw-rectangle pane x1 y1 (- (gp:port-width pane) x1) fh :filled t)
+                (gp:draw-rectangle pane 0 (+ y1 fh) (gp:port-width pane) (- y2 y1 fh fh) :filled t)
+                (gp:draw-rectangle pane 0 y2 x2 (- fh) :filled t))))))
+
+      ;; draw the foreground
+      (when fg-pixmap
+        (gp:draw-image pane (gp:make-image-from-port fg-pixmap) x y :from-x x :from-y y :to-width w :to-height h))
 
       ;; render the cursor over the text
       (when cursor-visible
-        (gp:draw-rectangle pane (1+ (* cursor-x fw)) (+ (* cursor-y fh) fa) (- fw 2) 3 :filled t)))))
+        (gp:draw-rectangle pane (1+ (* cursor-x fw)) (+ (* cursor-y fh) fa) (1- fw) 3 :filled t)))))
 
 (defmethod click-cursed-pane ((pane cursed-pane) x y)
   "Position the cursor from a click."
@@ -259,17 +274,22 @@
 
 (defmethod cursed-pane-scroll ((pane cursed-pane))
   "Scroll all the characters on the pane. The cursor does not move."
-  (with-slots (metrics pixmap chars chars-wide)
+  (with-slots (metrics bg-pixmap fg-pixmap chars chars-wide)
       pane
     (let ((w (gp:port-width pane))
           (h (gp:port-height pane)))
-      (gp:draw-image pixmap (gp:make-image-from-port pixmap) 0 0 :from-y (1- (gp:get-font-height pixmap)))
 
-      ;; clear the background of the bottom line
-      (gp:draw-rectangle pixmap 0 h w (- (cursed-font-height metrics)) :filled t)
+      ;; scroll up and clear the bottom line
+      (let ((fh (cursed-font-height metrics)))
+        (gp:draw-image bg-pixmap (gp:make-image-from-port bg-pixmap) 0 0 :from-y (1- fh))
+        (gp:draw-image fg-pixmap (gp:make-image-from-port fg-pixmap) 0 0 :from-y (1- fh))
+
+        ;; clear the background of the bottom line
+        (gp:draw-rectangle bg-pixmap 0 h w (- fh) :filled t :shape-mode :plain)
+        (gp:draw-rectangle bg-pixmap 0 h w (- fh) :filled t :foreground :transparent :operation :copy))
 
       ;; update the characters
-      (let ((new-line (make-string chars-wide  :initial-element #\space)))
+      (let ((new-line (make-string chars-wide :initial-element #\space)))
         (setf chars (concatenate 'string (subseq chars chars-wide) new-line)))
 
       ;; force redraw
@@ -290,7 +310,7 @@
                             :with line := (truncate start chars-wide)
                             
                             ;; loop over each line, insert newlines
-                            :for i :from start :below end
+                            :for i :from start :to end
                             :for y := (truncate i chars-wide)
                             
                             ;; insert a newline?
@@ -305,6 +325,10 @@
             string
           (set-clipboard pane nil string))))))
 
+(defmethod cursed-pane-paste ((pane cursed-pane))
+  "Paste the clipboard text into the pane."
+  (write-string (clipboard pane :string) pane))
+
 (defmethod (setf cursed-pane-cursor-visible-p) (visible-p (pane cursed-pane))
   "Change whether or not the cursor is visible."
   (with-slots (cursor-visible)
@@ -313,6 +337,14 @@
 
     ;; redraw the pane
     (gp:invalidate-rectangle pane)))
+
+(defmethod (setf cursed-pane-cursor-x) (x (pane cursed-pane))
+  "Redraw when positioning the cursor."
+  (file-position pane (list x (cursed-pane-cursor-y pane))))
+
+(defmethod (setf cursed-pane-cursor-y) (y (pane cursed-pane))
+  "Redraw when positioning the cursor."
+  (file-position pane (list (cursed-pane-cursor-x pane) y)))
 
 (defmethod stream:stream-file-position ((pane cursed-pane))
   "Return the current cursor position."
@@ -323,8 +355,8 @@
   "Set the position of the cursor."
   (destructuring-bind (x y)
       new-pos
-    (setf (cursed-pane-cursor-x pane) x
-          (cursed-pane-cursor-y pane) y)
+    (setf (slot-value pane 'cursor-x) x
+          (slot-value pane 'cursor-y) y)
 
     ;; redraw when the cursor is visible
     (when (cursed-pane-cursor-visible-p pane)
@@ -332,10 +364,11 @@
 
 (defmethod stream:stream-clear-output ((pane cursed-pane))
   "Wipe the pixmap."
-  (with-slots (pixmap chars chars-wide chars-high cursor-x cursor-y)
+  (with-slots (bg-pixmap fg-pixmap chars chars-wide chars-high cursor-x cursor-y)
       pane
-    ;; erase the pixmap
-    (gp:clear-graphics-port pixmap)
+    ;; erase the pixmaps
+    (gp:clear-graphics-port bg-pixmap)
+    (gp:clear-graphics-port fg-pixmap)
 
     ;; wipe the character buffer
     (setf chars (make-string (* chars-wide chars-high) :initial-element #\space))
@@ -371,7 +404,7 @@
 
 (defmethod stream:stream-write-char ((pane cursed-pane) char)
   "Output a single character at the current cursor position."
-  (with-slots (metrics pixmap chars (x cursor-x) (y cursor-y) chars-wide chars-high)
+  (with-slots (metrics bg-pixmap fg-pixmap chars (x cursor-x) (y cursor-y) chars-wide chars-high)
       pane
     (when (and (<= 0 x (1- chars-wide))
                (<= 0 y (1- chars-high)))
@@ -393,8 +426,10 @@
                      ;; render to the pixmap
                      (let ((fw (cursed-font-width metrics))
                            (fh (cursed-font-height metrics))
-                           (fa (cursed-font-ascent metrics)))
-                       (gp:draw-character pixmap char (* x fw) (+ (* y fh) fa) :block t))
+                           (fa (cursed-font-ascent metrics))
+                           (fi (cursed-font-indent metrics)))
+                       (gp:draw-rectangle bg-pixmap (* x fw) (* y fh) fw fh :filled t :shape-mode :plain)
+                       (gp:draw-character fg-pixmap char (+ (* x fw) fi) (+ (* y fh) fa) :block nil))
                      
                      ;; advance the cursor (wrap lines)
                      (when (>= (incf x) chars-wide)
